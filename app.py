@@ -6,76 +6,92 @@ from langchain.agents import initialize_agent, AgentType
 from langchain.callbacks import StreamlitCallbackHandler
 import socket
 
-# Set timeout for all sockets
+# Set timeout for network requests
 socket.setdefaulttimeout(15)
 
-# Safe tool initializers
-def safe_arxiv():
-    try:
-        return ArxivQueryRun(api_wrapper=ArxivAPIWrapper(
-            top_k_results=1,
-            doc_content_chars_max=200,
-            load_max_docs=1
-        ))
-    except Exception as e:
-        return lambda _: f"arXiv API Error: {str(e)}"
+# Tool initialization with input schema fixes
+def get_tools():
+    def create_wiki_tool():
+        try:
+            tool = WikipediaQueryRun(
+                api_wrapper=WikipediaAPIWrapper(
+                    top_k_results=1,
+                    doc_content_chars_max=200
+                )
+            )
+            tool.args_schema = None  # Disable structured input
+            return tool
+        except Exception:
+            return None
 
-def safe_wiki():
-    try:
-        return WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper(
-            top_k_results=1,
-            doc_content_chars_max=200
-        ))
-    except Exception as e:
-        return lambda _: f"Wikipedia API Error: {str(e)}"
+    def create_arxiv_tool():
+        try:
+            tool = ArxivQueryRun(
+                api_wrapper=ArxivAPIWrapper(
+                    top_k_results=1,
+                    doc_content_chars_max=200
+                )
+            )
+            tool.args_schema = None  # Disable structured input
+            return tool
+        except Exception:
+            return None
 
-# Streamlit UI
-st.title("🔍 Smart Research Assistant")
-st.caption("Powered by Groq (Llama3-8B) with Web Search capabilities")
+    return [
+        DuckDuckGoSearchRun(name="WebSearch"),
+        create_arxiv_tool(),
+        create_wiki_tool()
+    ]
+
+# Streamlit UI setup
+st.title("🔍 AI Research Assistant")
+st.markdown("""
+Powered by **Groq/Llama3-8B** with access to:
+- Web Search (DuckDuckGo)
+- Academic Papers (arXiv)
+- Wikipedia
+""")
 
 # Session state management
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "Hi! I can search the web, arXiv, and Wikipedia. Ask me anything!"}
+        {"role": "assistant", "content": "Hi! Ask me anything and I'll search relevant sources."}
     ]
 
 # Display chat history
 for msg in st.session_state.messages:
     st.chat_message(msg["role"]).write(msg["content"])
 
-# Get Groq API key from secrets
+# Get API key from Streamlit secrets
 groq_api_key = st.secrets.get("GROQ_API_KEY", "")
 
 # Chat input handling
-if prompt := st.chat_input("Ask your question..."):
+if prompt := st.chat_input("Enter your question..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     st.chat_message("user").write(prompt)
 
     if not groq_api_key:
-        st.error("Please configure GROQ_API_KEY in Streamlit secrets!")
+        st.error("Missing GROQ_API_KEY in secrets!")
         st.stop()
 
     try:
-        # Initialize LLM and tools
+        # Initialize components
         llm = ChatGroq(
             groq_api_key=groq_api_key,
             model_name="Llama3-8b-8192",
-            temperature=0.3
+            temperature=0.4
         )
         
-        tools = [
-            DuckDuckGoSearchRun(name="Web Search"),
-            safe_arxiv(),
-            safe_wiki()
-        ]
+        # Get tools with error handling
+        tools = [tool for tool in get_tools() if tool is not None]
 
         # Create agent
         agent = initialize_agent(
             tools,
             llm,
-            agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
+            agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
             handle_parsing_errors=True,
-            max_iterations=4,
+            max_iterations=3,
             verbose=True
         )
 
@@ -83,17 +99,21 @@ if prompt := st.chat_input("Ask your question..."):
         with st.chat_message("assistant"):
             st_cb = StreamlitCallbackHandler(st.container())
             try:
-                response = agent({"input": prompt}, callbacks=[st_cb])
-                output = response.get("output", "No results found")
+                response = agent.run(
+                    {"input": prompt},
+                    callbacks=[st_cb],
+                    include_run_info=True
+                )
+                output = response if response else "No results found"
             except Exception as e:
-                output = f"⚠️ Error processing request: {str(e)}"
+                output = f"⚠️ Error: {str(e)}"
             
             st.session_state.messages.append({"role": "assistant", "content": output})
             st.write(output)
 
     except Exception as e:
-        st.error(f"Critical error: {str(e)}")
+        st.error(f"System Error: {str(e)}")
         st.session_state.messages.append({
             "role": "assistant",
-            "content": "🚨 Failed to process request. Please try again."
+            "content": "🚨 Service unavailable. Please try later."
         })
