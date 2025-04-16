@@ -6,66 +6,48 @@ from langchain.agents import initialize_agent, AgentType
 from langchain.callbacks import StreamlitCallbackHandler
 import socket
 
-# Set timeout for network requests
-socket.setdefaulttimeout(15)
+# Set network timeout
+socket.setdefaulttimeout(20)
 
-# Tool initialization with input schema fixes
+# Tool initialization with proper input handling
 def get_tools():
-    def create_wiki_tool():
+    def create_tool(factory, name):
         try:
-            tool = WikipediaQueryRun(
-                api_wrapper=WikipediaAPIWrapper(
-                    top_k_results=1,
-                    doc_content_chars_max=200
-                )
-            )
-            tool.args_schema = None  # Disable structured input
-            return tool
-        except Exception:
-            return None
-
-    def create_arxiv_tool():
-        try:
-            tool = ArxivQueryRun(
-                api_wrapper=ArxivAPIWrapper(
-                    top_k_results=1,
-                    doc_content_chars_max=200
-                )
-            )
-            tool.args_schema = None  # Disable structured input
+            tool = factory()
+            tool.name = name  # Explicit name setting
+            tool.args_schema = None  # Disable Pydantic validation
             return tool
         except Exception:
             return None
 
     return [
         DuckDuckGoSearchRun(name="WebSearch"),
-        create_arxiv_tool(),
-        create_wiki_tool()
+        create_tool(lambda: ArxivQueryRun(
+            api_wrapper=ArxivAPIWrapper(top_k_results=1, doc_content_chars_max=200)
+        ), "Arxiv"),
+        create_tool(lambda: WikipediaQueryRun(
+            api_wrapper=WikipediaAPIWrapper(top_k_results=1, doc_content_chars_max=200)
+        ), "Wikipedia")
     ]
 
-# Streamlit UI setup
+# Streamlit UI
 st.title("🔍 AI Research Assistant")
-st.markdown("""
-Powered by **Groq/Llama3-8B** with access to:
-- Web Search (DuckDuckGo)
-- Academic Papers (arXiv)
-- Wikipedia
-""")
+st.caption("Powered by Groq's Llama3-8B with real-time web search capabilities")
 
-# Session state management
+# Session management
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "Hi! Ask me anything and I'll search relevant sources."}
+        {"role": "assistant", "content": "Hello! I can search the web, arXiv, and Wikipedia. Ask me anything!"}
     ]
 
-# Display chat history
+# Display history
 for msg in st.session_state.messages:
     st.chat_message(msg["role"]).write(msg["content"])
 
-# Get API key from Streamlit secrets
+# Get API key from secrets
 groq_api_key = st.secrets.get("GROQ_API_KEY", "")
 
-# Chat input handling
+# Process input
 if prompt := st.chat_input("Enter your question..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     st.chat_message("user").write(prompt)
@@ -79,13 +61,13 @@ if prompt := st.chat_input("Enter your question..."):
         llm = ChatGroq(
             groq_api_key=groq_api_key,
             model_name="Llama3-8b-8192",
-            temperature=0.4
+            temperature=0.4,
+            max_tokens=1024
         )
         
-        # Get tools with error handling
         tools = [tool for tool in get_tools() if tool is not None]
 
-        # Create agent
+        # Create agent with proper config
         agent = initialize_agent(
             tools,
             llm,
@@ -95,16 +77,16 @@ if prompt := st.chat_input("Enter your question..."):
             verbose=True
         )
 
-        # Generate response
+        # Execute agent with correct arguments
         with st.chat_message("assistant"):
             st_cb = StreamlitCallbackHandler(st.container())
             try:
+                # Corrected execution call
                 response = agent.run(
-                    {"input": prompt},
-                    callbacks=[st_cb],
-                    include_run_info=True
+                    input=prompt,  # Pass as keyword argument
+                    callbacks=[st_cb]
                 )
-                output = response if response else "No results found"
+                output = response or "No relevant results found"
             except Exception as e:
                 output = f"⚠️ Error: {str(e)}"
             
@@ -115,5 +97,5 @@ if prompt := st.chat_input("Enter your question..."):
         st.error(f"System Error: {str(e)}")
         st.session_state.messages.append({
             "role": "assistant",
-            "content": "🚨 Service unavailable. Please try later."
+            "content": "🚨 Service temporarily unavailable. Please try again."
         })
